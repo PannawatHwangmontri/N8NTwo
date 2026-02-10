@@ -1,161 +1,117 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-type Msg = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  ts: number;
+type ApiResult = {
+  transcript?: string;
+  answer?: string;
+  matches?: Array<any>;
+  error?: string;
 };
 
-function uuid() {
-  // Simple stable id (no external deps)
-  return crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
+export default function Home() {
+  const [isListening, setIsListening] = useState(false);
+  const [status, setStatus] = useState("พร้อมพูด");
+  const [result, setResult] = useState<ApiResult>({});
 
-export default function Page() {
-  const [sessionId, setSessionId] = useState<string>("");
-  const [messages, setMessages] = useState<Msg[]>([
-    {
-      id: uuid(),
-      role: "assistant",
-      text: "สวัสดีครับ พิมพ์ข้อความเพื่อเริ่มแชทได้เลย",
-      ts: Date.now(),
-    },
-  ]);
-  const currentUser = {
-  id: "U-001",
-  name: "Somchai",
-  };
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const recognitionRef = useRef<any>(null);
 
-  // Create a session id once
   useEffect(() => {
-    setSessionId(uuid());
-  }, []);
+    // รองรับ Chrome: webkitSpeechRecognition
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-  // Auto scroll
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, busy]);
+    if (!SpeechRecognition) {
+      setStatus("เบราว์เซอร์นี้ไม่รองรับ Web Speech API (แนะนำ Chrome เท่านั้น)");
+      return;
+    }
 
-  const canSend = useMemo(() => text.trim().length > 0 && !busy && sessionId, [text, busy, sessionId]);
+    const rec = new SpeechRecognition();
+    rec.lang = "th-TH";
+    rec.interimResults = false; // เอาเฉพาะผลสุดท้าย
+    rec.maxAlternatives = 1;
 
-  async function send() {
-    const userText = text.trim();
-    if (!userText || busy) return;
+    rec.onstart = () => {
+      setIsListening(true);
+      setStatus("กำลังฟัง... พูดคำถามได้เลย");
+    };
 
-    setText("");
-    setBusy(true);
+    rec.onend = () => {
+      setIsListening(false);
+      setStatus("หยุดฟังแล้ว");
+    };
 
-    const userMsg: Msg = { id: uuid(), role: "user", text: userText, ts: Date.now() };
-    setMessages((m) => [...m, userMsg]);
+    rec.onerror = (e: any) => {
+      setIsListening(false);
+      setStatus(`เกิดข้อผิดพลาด: ${e?.error || "unknown"}`);
+      setResult({ error: e?.error || "speech error" });
+    };
 
-    const typingId = uuid();
-    setMessages((m) => [
-      ...m,
-      { id: typingId, role: "assistant", text: "กำลังตอบ...", ts: Date.now() },
-    ]);
+    rec.onresult = async (event: any) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || "";
+      setStatus("ได้ข้อความแล้ว กำลังส่งไปถามระบบ...");
+      setResult({ transcript });
 
-    try {
-      const res = await fetch("/api/chat", {
+      // ส่ง transcript ไป server (ไม่ส่งไฟล์เสียงแล้ว)
+      const resp = await fetch("/api/voice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          user_id: currentUser.id,
-          customer_name: currentUser.name,
-          message: userText,
-        }),
+        body: JSON.stringify({ text: transcript }),
       });
 
-      const data = await res.json().catch(() => ({}));
+      const data: ApiResult = await resp.json();
+      setResult(data);
+      setStatus(data.error ? "เกิดข้อผิดพลาด" : "เสร็จสิ้น");
+    };
 
-      // Hard-fail safe
-      let reply: string =
-        typeof data?.reply === "string" && data.reply.trim() !== ""
-          ? data.reply
-          : "ขอโทษครับ ระบบไม่สามารถตอบได้ในขณะนี้";
+    recognitionRef.current = rec;
+  }, []);
 
-      // If reply accidentally contains n8n template, replace with safe message
-      if (reply.includes("{{$json") || reply.includes("={{$json")) {
-        reply = "ขอโทษครับ ระบบตอบกลับผิดรูปแบบ (ตรวจสอบ n8n response)";
-      }
-
-      // Update session id if backend returns one
-      if (typeof data?.session_id === "string" && data.session_id.trim() !== "") {
-        setSessionId(data.session_id);
-      }
-
-      // Replace typing placeholder with actual reply
-      setMessages((m) =>
-        m.map((x) => (x.id === typingId ? { ...x, text: reply, ts: Date.now() } : x))
-      );
-    } catch (e) {
-      // Replace typing placeholder with error
-      setMessages((m) =>
-        m.map((x) =>
-          x.id === typingId
-            ? { ...x, text: "เกิดข้อผิดพลาดในการเชื่อมต่อ", ts: Date.now() }
-            : x
-        )
-      );
-    } finally {
-      setBusy(false);
+  function start() {
+    setResult({});
+    try {
+      recognitionRef.current?.start();
+    } catch {
+      // บางครั้ง start ซ้ำเร็วเกิน จะ throw
     }
   }
 
+  function stop() {
+    recognitionRef.current?.stop();
+  }
+
   return (
-    <main className="min-h-screen bg-white p-6">
-      <div className="mx-auto max-w-4xl">
-        <h1 className="text-3xl font-bold">MVP Web Chat (Next.js → n8n → Gemini)</h1>
+    <main className="min-h-screen p-6 max-w-3xl mx-auto">
+      <h1 className="text-2xl font-bold">IT Shop Voice Q&A (Web Speech)</h1>
+      <p className="text-sm opacity-80 mt-2">
+        กดเริ่มแล้วพูด เช่น “มี SSD 1TB ไหม ราคาเท่าไหร่”
+      </p>
 
-        <div className="mt-4 rounded-xl border p-4">
-          <div className="h-[520px] overflow-y-auto rounded-lg border bg-white p-4">
-            <div className="space-y-6">
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div className="max-w-[75%] rounded-lg border p-3">
-                    <div className="text-xs text-gray-500">{m.role}</div>
-                    <div className="whitespace-pre-wrap text-base font-medium">{m.text}</div>
-                  </div>
-                </div>
-              ))}
-              <div ref={bottomRef} />
-            </div>
-          </div>
-
-          <div className="mt-4 flex gap-3">
-            <input
-              className="flex-1 rounded-lg border px-4 py-3 text-base"
-              placeholder="พิมพ์ข้อความ..."
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") send();
-              }}
-              disabled={busy}
-            />
-            <button
-              className="rounded-lg bg-black px-6 py-3 text-white disabled:opacity-50"
-              onClick={send}
-              disabled={!canSend}
-            >
-              Send
-            </button>
-          </div>
-
-          <div className="mt-3 text-sm text-gray-600">
-            Session: <span className="font-mono">{sessionId}</span>
-          </div>
-        </div>
+      <div className="mt-6 flex gap-3">
+        {!isListening ? (
+          <button className="px-4 py-2 rounded bg-black text-white" onClick={start}>
+            เริ่มพูด
+          </button>
+        ) : (
+          <button className="px-4 py-2 rounded bg-red-600 text-white" onClick={stop}>
+            หยุด
+          </button>
+        )}
+        <div className="px-3 py-2 rounded border text-sm">{status}</div>
       </div>
+
+      <section className="mt-8 space-y-4">
+        <div className="p-4 rounded border">
+          <div className="font-semibold">ข้อความที่ถอดเสียง</div>
+          <div className="mt-2 text-sm">{result.transcript ?? "-"}</div>
+        </div>
+
+        <div className="p-4 rounded border">
+          <div className="font-semibold">คำตอบ</div>
+          <div className="mt-2 text-sm">{result.answer ?? "-"}</div>
+          {result.error && <div className="mt-2 text-sm text-red-600">{result.error}</div>}
+        </div>
+      </section>
     </main>
   );
 }
